@@ -5,7 +5,11 @@ import 'services/notification_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await NotificationService.instance.init(); // now safe (won’t crash)
+  await NotificationService.instance.init();
+  // Ask for permissions early so restored schedules can actually display
+  await NotificationService.instance.requestPermission();
+  await NotificationService.instance
+      .rescheduleAllFromStorage(); // restore saved reminders
   runApp(const AppRoot());
 }
 

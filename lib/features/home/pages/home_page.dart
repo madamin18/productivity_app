@@ -23,18 +23,59 @@ class HomePage extends StatelessWidget {
         title: const Text("Productivity App"),
         actions: [
           IconButton(
-            tooltip: 'Test notification',
+            tooltip: 'Debug 10s Timer',
             onPressed: () async {
-              await NotificationService.instance.requestPermission();
-              await NotificationService.instance.showNow(
-                title: 'Hello from Productivity App',
-                body: 'This is your test notification!',
+              final ok = await NotificationService.instance.requestPermission();
+              if (!context.mounted) return;
+              if (!ok) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Notifications not permitted')),
+                );
+                return;
+              }
+
+              final start = DateTime.now();
+              debugPrint('==> Button pressed at $start');
+
+              // Call the pure Timer fallback directly so we can see both logs
+              await NotificationService.instance.timerInSeconds(
+                id: 9300,
+                seconds: 10,
+                title: 'Timer fired',
+                body: 'Fired at ${DateTime.now()}',
               );
+
+              debugPrint(
+                '==> Timer scheduled for ${start.add(const Duration(seconds: 10))}',
+              );
+              if (!context.mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Test notification sent')),
+                const SnackBar(
+                  content: Text('Timer set for 10s — keep app open'),
+                ),
               );
             },
-            icon: const Icon(Icons.notifications),
+            icon: const Icon(Icons.bug_report),
+          ),
+
+          IconButton(
+            tooltip: 'Test 10-sec schedule',
+            onPressed: () async {
+              final ok = await NotificationService.instance.requestPermission();
+              if (ok) {
+                await NotificationService.instance.scheduleInSeconds(
+                  id: 9992,
+                  seconds: 10,
+                  title: 'Test (10 sec)',
+                  body: 'This should appear after 10 seconds ✅',
+                );
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Scheduled in 10 seconds')),
+                );
+              }
+            },
+            icon: const Icon(Icons.timer),
           ),
         ],
       ),

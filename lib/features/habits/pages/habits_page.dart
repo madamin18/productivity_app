@@ -2,10 +2,10 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/habit.dart';
+import '../../../services/notification_service.dart';
 
 class HabitsPage extends StatefulWidget {
   const HabitsPage({super.key});
-
   @override
   State<HabitsPage> createState() => _HabitsPageState();
 }
@@ -20,7 +20,7 @@ class _HabitsPageState extends State<HabitsPage> {
     _load();
   }
 
-  // -------- Persistence ----------
+  // ---------- Persistence ----------
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString('habits') ?? '[]';
@@ -38,39 +38,91 @@ class _HabitsPageState extends State<HabitsPage> {
     await prefs.setString('habits', raw);
   }
 
-  // -------- Helpers ----------
+  // ---------- Time & Notifications ----------
+  Future<TimeOfDay?> _pickTime() async {
+    final now = TimeOfDay.now();
+    return showTimePicker(context: context, initialTime: now);
+  }
+
+  Future<void> _scheduleIfNeeded(Habit h) async {
+    if (h.reminderHour == null || h.reminderMinute == null) return;
+
+    final tod = TimeOfDay(hour: h.reminderHour!, minute: h.reminderMinute!);
+
+    final secs = NotificationService.instance.secondsUntilToday(tod);
+    if (secs > 0 && secs <= 15 * 60) {
+      await NotificationService.instance.scheduleSmartSeconds(
+        id: NotificationService.instance.boosterId(h.id), // <-- booster id
+        seconds: secs,
+        title: 'Habit reminder',
+        body: h.title,
+      );
+    }
+
+    await NotificationService.instance.scheduleDailyInexact(
+      id: h.id,
+      time: tod,
+      title: 'Habit reminder',
+      body: h.title,
+    );
+  }
+
+  Future<void> _cancelReminder(Habit h) async {
+    await NotificationService.instance.cancel(h.id);
+    await NotificationService.instance.cancel(
+      NotificationService.instance.boosterId(h.id),
+    );
+  }
+
+  // ---------- Actions ----------
+  void _addHabit() async {
+    final t = _controller.text.trim();
+    if (t.isEmpty) return;
+
+    final picked = await _pickTime(); // optional reminder time
+    final newHabit = Habit(
+      id: DateTime.now().millisecondsSinceEpoch,
+      title: t,
+      streak: 0,
+      lastCheckedDate: null,
+      reminderHour: picked?.hour,
+      reminderMinute: picked?.minute,
+    );
+
+    setState(() {
+      _habits.add(newHabit);
+      _controller.clear();
+    });
+
+    await _save();
+    if (!mounted) return;
+    await NotificationService.instance.ensurePermissionsWithSettingsPrompt(
+      context,
+    );
+    await _scheduleIfNeeded(newHabit);
+  }
+
+  void _deleteHabit(int i) async {
+    final h = _habits[i];
+    setState(() => _habits.removeAt(i));
+    await _save();
+    await _cancelReminder(h);
+  }
+
   bool _isSameDate(DateTime a, DateTime b) =>
       a.year == b.year && a.month == b.month && a.day == b.day;
 
   bool _isYesterday(DateTime a, DateTime b) {
-    // returns true if 'a' is exactly one day before 'b' (date-only)
     final ay = DateTime(a.year, a.month, a.day);
     final by = DateTime(b.year, b.month, b.day);
     return ay.add(const Duration(days: 1)) == by;
   }
 
-  // -------- Actions ----------
-  void _addHabit() {
-    final t = _controller.text.trim();
-    if (t.isEmpty) return;
-    setState(() {
-      _habits.add(Habit(title: t));
-      _controller.clear();
-    });
-    _save();
-  }
-
-  void _deleteHabit(int i) {
-    setState(() => _habits.removeAt(i));
-    _save();
-  }
-
-  void _checkInToday(int i) {
+  void _checkInToday(int i) async {
     final today = DateTime.now();
     final todayD = DateTime(today.year, today.month, today.day);
     final h = _habits[i];
 
-    // If already checked today, do nothing
     if (h.lastCheckedDate != null && _isSameDate(h.lastCheckedDate!, todayD)) {
       ScaffoldMessenger.of(
         context,
@@ -78,21 +130,61 @@ class _HabitsPageState extends State<HabitsPage> {
       return;
     }
 
-    // Streak rules
     if (h.lastCheckedDate == null) {
       h.streak = 1;
     } else if (_isYesterday(h.lastCheckedDate!, todayD)) {
-      h.streak += 1; // continued streak
-    } else if (_isSameDate(h.lastCheckedDate!, todayD)) {
-      // already handled above
+      h.streak += 1;
     } else {
-      h.streak = 1; // missed a day -> reset to 1
+      h.streak = 1;
     }
-
     h.lastCheckedDate = todayD;
 
     setState(() {});
-    _save();
+    await _save();
+  }
+
+  // Optional: long-press to set/change/clear reminder
+  Future<void> _editReminder(int index) async {
+    final picked = await _pickTime();
+    final h = _habits[index];
+
+    if (picked == null) {
+      // Clear reminder
+      h.reminderHour = null;
+      h.reminderMinute = null;
+      await NotificationService.instance.cancel(h.id); // remove any pending
+    } else {
+      // Update reminder time
+      h.reminderHour = picked.hour;
+      h.reminderMinute = picked.minute;
+
+      await NotificationService.instance.requestPermission();
+
+      // Cancel any previous schedule for this habit id to avoid duplicates
+      await NotificationService.instance.cancel(h.id);
+
+      // Booster: if today's chosen time is within next 15 minutes, fire once today
+      final secs = NotificationService.instance.secondsUntilToday(picked);
+      if (secs > 0 && secs <= 15 * 60) {
+        await NotificationService.instance.scheduleSmartSeconds(
+          id: h.id,
+          seconds: secs,
+          title: 'Habit reminder',
+          body: h.title,
+        );
+      }
+
+      // Always (re)schedule the daily repeating reminder
+      await NotificationService.instance.scheduleDailyInexact(
+        id: h.id,
+        time: picked,
+        title: 'Habit reminder',
+        body: h.title,
+      );
+    }
+
+    setState(() {});
+    await _save();
   }
 
   @override
@@ -137,9 +229,15 @@ class _HabitsPageState extends State<HabitsPage> {
                       final last = h.lastCheckedDate != null
                           ? '${h.lastCheckedDate!.year}-${h.lastCheckedDate!.month.toString().padLeft(2, '0')}-${h.lastCheckedDate!.day.toString().padLeft(2, '0')}'
                           : '—';
+                      final hasReminder =
+                          h.reminderHour != null && h.reminderMinute != null;
+                      final reminderLabel = hasReminder
+                          ? ' ⏰ ${h.reminderHour!.toString().padLeft(2, '0')}:${h.reminderMinute!.toString().padLeft(2, '0')}'
+                          : '';
 
                       return Dismissible(
-                        key: ValueKey('${h.title}-$i'),
+                        key: ValueKey('${h.id}-$i'),
+                        onDismissed: (_) => _deleteHabit(i),
                         background: Container(
                           alignment: Alignment.centerLeft,
                           padding: const EdgeInsets.only(left: 16),
@@ -150,9 +248,9 @@ class _HabitsPageState extends State<HabitsPage> {
                           padding: const EdgeInsets.only(right: 16),
                           child: const Icon(Icons.delete),
                         ),
-                        onDismissed: (_) => _deleteHabit(i),
                         child: ListTile(
-                          title: Text(h.title),
+                          onLongPress: () => _editReminder(i),
+                          title: Text('${h.title}$reminderLabel'),
                           subtitle: Text(
                             'Streak: ${h.streak}   •   Last: $last',
                           ),
